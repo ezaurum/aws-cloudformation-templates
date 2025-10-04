@@ -1,12 +1,11 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Terraform Bootstrap - S3, DynamoDB, IAM Roles for State Management'
+Description: 'Terraform Bootstrap - S3, DynamoDB, KMS, IAM Roles for State Management'
 
 Parameters:
   ProjectName:
     Type: String
     Default: 'terraform-bootstrap'
     Description: 'Project name for resource naming'
-  
   Environment:
     Type: String
     Default: 'dev'
@@ -14,7 +13,35 @@ Parameters:
     Description: 'Environment name'
 
 Resources:
-  # S3 Bucket for Terraform State
+  # KMS Key - 먼저 생성되어야 S3 버킷 암호화에 사용 가능
+  TerraformKMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: 'KMS Key for Terraform state encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccountRoot
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  TerraformKMSKeyAlias:
+    Type: 'AWS::KMS::Alias'
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}-${Environment}-terraform'
+      TargetKeyId: !Ref TerraformKMSKey
+
+  # S3 Bucket - Terraform 상태 저장용
   TerraformStateBucket:
     Type: 'AWS::S3::Bucket'
     Properties:
@@ -24,7 +51,9 @@ Resources:
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
-              SSEAlgorithm: 'AES256'
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: !Ref TerraformKMSKey
+            BucketKeyEnabled: true
       LifecycleConfiguration:
         Rules:
           - Id: DeleteOldVersions
@@ -35,11 +64,34 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      NotificationConfiguration:
-        CloudWatchConfigurations:
-          - Event: 's3:ObjectCreated:*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
 
-  # DynamoDB Table for State Locking
+  # S3 버킷 정책 - SSL/TLS 필수
+  TerraformStateBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref TerraformStateBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt TerraformStateBucket.Arn
+              - !Sub '${TerraformStateBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # DynamoDB 테이블 - Terraform 상태 잠금용
   TerraformStateLockTable:
     Type: 'AWS::DynamoDB::Table'
     Properties:
@@ -53,36 +105,15 @@ Resources:
       BillingMode: 'PAY_PER_REQUEST'
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
 
-  # KMS Key for additional encryption
-  TerraformKMSKey:
-    Type: 'AWS::KMS::Key'
-    Properties:
-      Description: 'KMS Key for Terraform state encryption'
-      KeyPolicy:
-        Statement:
-          - Sid: Enable IAM policies
-            Effect: Allow
-            Principal:
-              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
-            Action: 'kms:*'
-            Resource: '*'
-          - Sid: Allow Terraform operations
-            Effect: Allow
-            Principal:
-              AWS: !GetAtt TerraformOperatorRole.Arn
-            Action:
-              - 'kms:Decrypt'
-              - 'kms:GenerateDataKey'
-            Resource: '*'
-
-  TerraformKMSKeyAlias:
-    Type: 'AWS::KMS::Alias'
-    Properties:
-      AliasName: !Sub 'alias/${ProjectName}-${Environment}-terraform'
-      TargetKeyId: !Ref TerraformKMSKey
-
-  # IAM Role for Terraform Operations
+  # IAM 역할 - Terraform 운영자용
   TerraformOperatorRole:
     Type: 'AWS::IAM::Role'
     Properties:
@@ -93,10 +124,6 @@ Resources:
           - Effect: Allow
             Principal:
               AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
-            Action: 'sts:AssumeRole'
-          - Effect: Allow
-            Principal:
-              Service: 'ec2.amazonaws.com'
             Action: 'sts:AssumeRole'
       ManagedPolicyArns:
         - 'arn:aws:iam::aws:policy/PowerUserAccess'
@@ -124,29 +151,43 @@ Resources:
                 Action:
                   - 'kms:Decrypt'
                   - 'kms:GenerateDataKey'
-                Resource: !GetAtt TerraformKMSKey.Arn
+                Resource: !Ref TerraformKMSKey
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
 
 Outputs:
   TerraformStateBucketName:
     Description: 'S3 Bucket name for Terraform state'
     Value: !Ref TerraformStateBucket
     Export:
-      Name: !Sub '${ProjectName}-${Environment}-state-bucket'
+      Name: !Sub '${ProjectName}-${Environment}-StateBucket'
 
   TerraformLockTableName:
     Description: 'DynamoDB table name for state locking'
     Value: !Ref TerraformStateLockTable
     Export:
-      Name: !Sub '${ProjectName}-${Environment}-lock-table'
+      Name: !Sub '${ProjectName}-${Environment}-LockTable'
 
   TerraformOperatorRoleArn:
     Description: 'ARN of the Terraform operator role'
     Value: !GetAtt TerraformOperatorRole.Arn
     Export:
-      Name: !Sub '${ProjectName}-${Environment}-operator-role-arn'
+      Name: !Sub '${ProjectName}-${Environment}-OperatorRoleArn'
 
   KMSKeyId:
     Description: 'KMS Key ID for Terraform state encryption'
     Value: !Ref TerraformKMSKey
     Export:
-      Name: !Sub '${ProjectName}-${Environment}-kms-key-id'
+      Name: !Sub '${ProjectName}-${Environment}-KmsKeyId'
+
+  KMSKeyArn:
+    Description: 'KMS Key ARN for Terraform state encryption'
+    Value: !GetAtt TerraformKMSKey.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-KmsKeyArn'
+
