@@ -2,8 +2,10 @@
 
 STACK_NAME=terraform-bootstrap-stack
 REGION=ap-northeast-2
+# 1. 위치인자 우선으로 PROFILE 변수 설정
+PROFILE="${1:-${AWS_PROFILE:-default}}"
 
-OUTPUTS=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION --query "Stacks[0].Outputs" --output json)
+OUTPUTS=$(aws cloudformation describe-stacks --stack-name $STACK_NAME --region $REGION --profile $PROFILE --query "Stacks[0].Outputs" --output json)
 
 BUCKET=$(echo $OUTPUTS | jq -r '.[] | select(.OutputKey=="TerraformStateBucketName") | .OutputValue')
 DDB=$(echo $OUTPUTS | jq -r '.[] | select(.OutputKey=="TerraformLockTableName") | .OutputValue')
