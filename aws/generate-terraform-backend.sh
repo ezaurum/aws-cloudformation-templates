@@ -33,7 +33,7 @@ provider "aws" {
   region = "$REGION"
 
   assume_role {
-    role_arn = "$ROLE_ARN"
+    role_arn = "$ROLE"
   }
 }
 EOF
